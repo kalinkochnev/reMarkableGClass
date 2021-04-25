@@ -8,3 +8,4 @@ CLASSES = {
     "Writing": "Professional and Technical Writing",
     "Physics": "Block5 (mod9) AP Physics C - DeLano",
 }
+TITLE_MATCH_THRESH = 80
