@@ -9,3 +9,4 @@ CLASSES = {
     "Physics": "Block5 (mod9) AP Physics C - DeLano",
 }
 TITLE_MATCH_THRESH = 80
+DRIVE_FOLDER_NAME = "reMarkableGClass"
