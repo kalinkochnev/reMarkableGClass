@@ -18,7 +18,6 @@ def test_g_drive(auth):
 
 
 if __name__ == "__main__":
-    auth = Auth()
-    test_g_drive(auth)
+    pass
 
 

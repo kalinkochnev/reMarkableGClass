@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Adapted from reHackable/maxio: https://github.com/reHackable/maxio/blob/master/tools/exportNotebook
+
+
+# Needs:
+# - ssh and scp (openssh)
+# - convert (imagemagick)
+# - pdftk (pdftk)
+# - rsvg-convert (optional, to avoid rasterizing of lines)
+# - gs & pdfinfo (optional, to account for original pdf size)
+
+
+SSH_HOST="10.11.99.1"
+SSH_TIMEOUT=1
+path=""
+bad_args=""
+arg_num=0
+KEEP_TEMPDIR=""
+OUTPUT_PATH=""
+
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        -k|--keep_tempdir)
+            KEEP_TEMPDIR=true
+            shift
+            ;;
+        -r|--remoteip)
+            SSH_HOST="$2"
+            SSH_TIMEOUT=10
+            shift
+            shift
+            ;;
+
+        -o|--output)
+            OUTPUT_PATH="$2"
+            shift
+            shift
+            ;;     
+
+        -*)
+
+            echo "Unknown option: $1"
+            bad_args=TRUE
+            shift
+            ;;
+        *)
+            arg_num=$(( $arg_num + 1 ))
+            case $arg_num in
+                1)
+                    path="$1"
+                    shift
+                    ;;
+                *)
+                    bad_args=TRUE
+            esac
+            ;;
+    esac
+done
+
+if [[ $bad_args == TRUE || $arg_num < 1 ]]; then
+    echo "Usage: $(basename "$0") [--askrename|-n] [--remoteip|-r STR] [--keep_tempdir|-k] <document-name-match|tar.gz-file>"
+    exit 1
+fi
+
+
+function rmtgrep {
+    RET_MATCH="$(${SSH_CMD} "$SSH_REMOTE" "/bin/egrep -$1 '$2' $3")"
+    echo "/bin/egrep -$1 '$2' $3: $RET_MATCH"
+}
+
+declare -A DOCUMENTS_NAMES
+declare -A DOCUMENTS_DATES
+
+function find_document {
+    _PATH=(${2#/}) # Sort path into array
+
+    MATCH="${_PATH[$3]}"
+    [ ${MATCH: -1} == "$" ] && MATCH="${MATCH:0:-1}" || MATCH="${MATCH}.*"
+    [ ${MATCH:0:1} == "^" ] && MATCH="${MATCH:1}" || MATCH=".*${MATCH}"
+    rmtgrep "ile" "\"visibleName\": \"${MATCH}\"" "/home/root/.local/share/remarkable/xochitl/*.metadata"
+    echo $RET_MATCH
+    matches_by_name="$RET_MATCH"
+
+    for metadata_path in $matches_by_name; do
+
+        metadata="$(${SSH_CMD} "$SSH_REMOTE" "cat $metadata_path")"
+        echo "$metadata"
+
+        # This checks if there is a parent to the document and skips over it if it does
+        # if ! echo "$metadata" | grep -qF "\"parent\": \"$1\""; then
+        #     continue
+        # fi
+
+        if echo "$metadata" | grep -qF '"deleted": true'; then
+            continue
+        fi
+
+        if [[ "$(expr $3 + 1)" -eq "${#_PATH[@]}" ]]; then
+            if echo "$metadata" | grep -qF '"type": "DocumentType"'; then
+                _UUID="$(basename "$metadata_path" .metadata)"
+                NAME="$(echo "$metadata" | grep '"visibleName"' | sed 's/^.*: \+"\([^"]\+\)"/\1/g')"
+                IDATE="$(echo "$metadata" | grep '"lastModified"' | egrep -o '[0-9]*')"
+                STRDATE="$(date -d @$(expr ${IDATE} / 1000) '+%Y-%m-%d %H:%M:%S')"
+                DOCUMENTS_NAMES["$_UUID"]="$NAME"
+                DOCUMENTS_DATES["$_UUID"]="$STRDATE"
+            fi
+        else
+            if echo "$metadata" | grep -qF '"type": "CollectionType"'; then
+                find_document "$(basename "$metadata_path" .metadata)" "$2" "$(expr $3 + 1)"
+            fi
+        fi
+
+    done
+}
+
+# Kills SSH session and exits with return 1
+function exit_failed {
+    ${SSH_CMD} -O exit "$SSH_REMOTE"
+    exit 1
+}
+
+tmpfolder=$(mktemp -d)
+echo "Using temp folder '$tmpfolder'"
+
+OUTPUT_UUID=""
+
+if [ -f "$path" ]; then
+    tar -xvzf "$path" -C "$tmpfolder"
+    [ ! $? -eq 0 ] && echo "File '$path' exists, but it is not a valid .tar.gz" && exit 1
+    filename="$(basename $path .tar.gz)"
+
+else
+
+    # Establish remote connection
+    SSH_REMOTE="root@${SSH_HOST}"
+    SSH_CMD="ssh -S remarkable-ssh"
+    SCP_CMD="scp -o ControlPath=remarkable-ssh"
+    ${SSH_CMD} -o ConnectTimeout=${SSH_TIMEOUT} -M -f -q ${SSH_REMOTE} -N
+    [ ! $? -eq 0 ] && echo "Failed to establish connection with the device!" && exit 1
+
+    # Search for given pattern
+    echo "Searching for '$path'"
+    find_document "" "$path" 0
+
+    DOCUMENTS_UUIDS=(${!DOCUMENTS_NAMES[@]})
+    echo "${#DOCUMENTS_UUIDS[@]}"
+    echo "${DOCUMENTS_UUIDS[@]}"
+
+    # Entry not found
+    if [ "${#DOCUMENTS_UUIDS[@]}" -eq 0 ]; then
+        echo "exportNotebook: Unable to find document: $path"
+        exit_failed
+    fi
+
+    # Multiple entries match
+    if [ "${#DOCUMENTS_UUIDS[@]}" -gt 1 ]; then
+        echo "'$path' matches multiple files!"
+
+        while true; do
+            echo
+
+            # Display file id's from most recently modified to oldest
+            for (( i=0; i<${#DOCUMENTS_UUIDS[@]}; i++ )); do
+                _UUID=${DOCUMENTS_UUIDS[$i]}
+                NAME=${DOCUMENTS_NAMES[$_UUID]}
+                STRDATE=${DOCUMENTS_DATES[$_UUID]}
+                echo -e "$(expr $i + 1). - $_UUID - $NAME - $STRDATE"
+            done
+
+            echo
+            read -rp "Select your target: " INPUT
+            echo
+
+            if [[ "$INPUT" -gt 0  && "$INPUT" -lt $(expr $i + 1) ]]; then
+                let INPUT=INPUT-1
+                OUTPUT_UUID="${DOCUMENTS_UUIDS[$INPUT]}"
+                break
+            fi
+
+            echo "Invalid input"
+        done
+
+
+        # Entry found
+    else
+        OUTPUT_UUID="$DOCUMENTS_UUIDS"
+    fi
+
+    echo "UUID : $OUTPUT_UUID"
+    echo "Name : ${DOCUMENTS_NAMES[$OUTPUT_UUID]}"
+
+
+    UUID_PATH="/home/root/.local/share/remarkable/xochitl/${OUTPUT_UUID}"
+    # Getting notebook data
+
+    echo "$OUTPUT_PATH"/
+    if [ $OUTPUT_PATH == "" ]
+    then
+        echo "Default is $PWD"
+        OUTPUT_PATH=$PWD
+    fi
+
+    ${SCP_CMD} -rp ${SSH_REMOTE}:"$UUID_PATH"{,.content,.pagedata,.metadata} "${OUTPUT_PATH}"/ 
+    [ ! $? -eq 0 ] && echo "Failed to get notebook data" && exit 1
+fi
