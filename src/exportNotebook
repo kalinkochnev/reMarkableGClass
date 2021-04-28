@@ -73,11 +73,14 @@ declare -A DOCUMENTS_NAMES
 declare -A DOCUMENTS_DATES
 
 function find_document {
-    _PATH=(${2#/}) # Sort path into array
+    _PATH=${2//$pattern/} # Removes quotes around notebook name (to preserve spaced names)
+    MATCH=$_PATH 
 
-    MATCH="${_PATH[$3]}"
+    # adds wildcards for searching
     [ ${MATCH: -1} == "$" ] && MATCH="${MATCH:0:-1}" || MATCH="${MATCH}.*"
     [ ${MATCH:0:1} == "^" ] && MATCH="${MATCH:1}" || MATCH=".*${MATCH}"
+
+    # returns paths of files that matched the name of the notebook
     rmtgrep "ile" "\"visibleName\": \"${MATCH}\"" "/home/root/.local/share/remarkable/xochitl/*.metadata"
     echo $RET_MATCH
     matches_by_name="$RET_MATCH"
@@ -92,10 +95,12 @@ function find_document {
         #     continue
         # fi
 
+        # Skips over the notebook if marked as deleted
         if echo "$metadata" | grep -qF '"deleted": true'; then
             continue
         fi
 
+        # No idea what this does
         if [[ "$(expr $3 + 1)" -eq "${#_PATH[@]}" ]]; then
             if echo "$metadata" | grep -qF '"type": "DocumentType"'; then
                 _UUID="$(basename "$metadata_path" .metadata)"
@@ -140,7 +145,7 @@ else
     [ ! $? -eq 0 ] && echo "Failed to establish connection with the device!" && exit 1
 
     # Search for given pattern
-    echo "Searching for '$path'"
+    echo "Searching for $path"
     find_document "" "$path" 0
 
     DOCUMENTS_UUIDS=(${!DOCUMENTS_NAMES[@]})
@@ -201,6 +206,7 @@ else
         OUTPUT_PATH=$PWD
     fi
 
-    ${SCP_CMD} -rp ${SSH_REMOTE}:"$UUID_PATH"{,.content,.pagedata,.metadata} "${OUTPUT_PATH}"/ 
+    # Copies over all matching metadata including background pdfs
+    ${SCP_CMD} -rp ${SSH_REMOTE}:"$UUID_PATH"{,.content,.pagedata,.metadata,.pdf} "${OUTPUT_PATH}"/ 
     [ ! $? -eq 0 ] && echo "Failed to get notebook data" && exit 1
 fi
